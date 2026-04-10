@@ -398,7 +398,7 @@ def detect_patterns(df):
 # ─────────────────────────────────────────────────────────────────────────────
 # SIGNAL ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
-def compute_signal(df):
+def compute_signal(df, min_conditions=3):
     if len(df) < 3:
         return None
 
@@ -508,10 +508,10 @@ def compute_signal(df):
     long_score  = sum(conditions_long.values())
     short_score = sum(conditions_short.values())
 
-    if long_score >= 3 and long_score > short_score + 1:
+    if long_score >= min_conditions and long_score > short_score + 1:
         signal   = "LONG"
         strength = min(100, int(long_score / 7 * 100 + 10))
-    elif short_score >= 3 and short_score > long_score + 1:
+    elif short_score >= min_conditions and short_score > long_score + 1:
         signal   = "SHORT"
         strength = min(100, int(short_score / 7 * 100 + 10))
     else:
@@ -957,6 +957,28 @@ def make_equity_chart(bt_result):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SIGNAL BADGE HELPER
+# ─────────────────────────────────────────────────────────────────────────────
+def signal_badge(signal, strength):
+    _color = {"LONG": "#2ea043", "SHORT": "#f85149", "NEUTRAL": "#8b949e"}.get(signal, "#8b949e")
+    _emoji = {"LONG": "🟢",      "SHORT": "🔴",       "NEUTRAL": "⚪"}.get(signal, "⚪")
+    _rgb   = {"LONG": "46,160,67","SHORT": "248,81,73","NEUTRAL": "139,148,158"}.get(signal, "139,148,158")
+    return (
+        f"<span style='"
+        f"background:rgba({_rgb},0.15);"
+        f"color:{_color};"
+        f"border:1px solid {_color};"
+        f"border-radius:6px;"
+        f"padding:2px 10px;"
+        f"font-family:Space Mono,monospace;"
+        f"font-size:0.8rem;"
+        f"font-weight:700'>"
+        f"{_emoji} {signal} {strength}"
+        f"</span>"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -1001,6 +1023,33 @@ with st.sidebar:
         format="%d",
     )
 
+    st.markdown("---")
+    st.markdown("**🎯 Signal Filter**")
+
+    signal_filter = st.multiselect(
+        "Show signals",
+        options=["LONG", "NEUTRAL", "SHORT"],
+        default=["LONG", "NEUTRAL", "SHORT"],
+    )
+
+    risk_filter = st.multiselect(
+        "Risk level",
+        options=["LOW", "MEDIUM", "HIGH"],
+        default=["LOW", "MEDIUM", "HIGH"],
+    )
+
+    st.markdown("**⚙️ Signal Sensitivity**")
+    min_strength = st.slider(
+        "Minimum signal strength",
+        min_value=0, max_value=100, value=0, step=5,
+        help="Only show signals at or above this strength",
+    )
+    min_conditions = st.slider(
+        "Min conditions required",
+        min_value=1, max_value=7, value=3, step=1,
+        help="How many conditions must be met to trigger LONG or SHORT",
+    )
+
     st.caption("Data: Yahoo Finance · Cached 5 min")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1021,7 +1070,7 @@ if df_raw is None or df_raw.empty:
 
 df = compute_indicators(df_raw.copy())
 patterns = detect_patterns(df)
-sig = compute_signal(df)
+sig = compute_signal(df, min_conditions)
 
 # Price summary
 last_close = float(df["Close"].iloc[-1]) if pd.notna(df["Close"].iloc[-1]) else 0.0
@@ -1038,7 +1087,7 @@ if "portfolio" not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊 Chart & Signal", "⏱ Backtesting", "💼 Portfolio Tracker"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Chart & Signal", "⏱ Backtesting", "💼 Portfolio Tracker", "📋 Scanner"])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Chart & Signal
@@ -1050,15 +1099,17 @@ with tab1:
         # Header
         chg_class = "change-up" if price_change >= 0 else "change-down"
         chg_arrow = "▲" if price_change >= 0 else "▼"
+        badge_html = signal_badge(sig["signal"], sig["strength"]) if sig else ""
         st.markdown(f"""
         <div class="ticker-label">
             {ticker} &nbsp;·&nbsp; {period} &nbsp;·&nbsp; {interval}
         </div>
-        <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:12px;">
+        <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:12px; flex-wrap:wrap;">
             <span class="price-header">{curr_sym}{last_close:,.2f}</span>
             <span class="change-badge {chg_class}">
                 {chg_arrow} {abs(price_change):,.2f} ({abs(price_change_pct):.2f}%)
             </span>
+            {badge_html}
         </div>
         """, unsafe_allow_html=True)
 
@@ -1099,49 +1150,69 @@ with tab1:
         if sig is None:
             st.warning("Not enough data to compute signal.")
         else:
-            s = sig["signal"]
+            s        = sig["signal"]
             strength = sig["strength"]
+            rl       = sig["risk_level"]
 
-            if s == "LONG":
-                box_class  = "signal-long"
-                sig_emoji  = "🟢"
-            elif s == "SHORT":
-                box_class  = "signal-short"
-                sig_emoji  = "🔴"
+            # ── Signal gate ──────────────────────────────────────────────────
+            signal_blocked = (
+                s not in signal_filter or
+                rl not in risk_filter or
+                strength < min_strength
+            )
+
+            if signal_blocked:
+                st.markdown(f"""
+                <div class="signal-box signal-neutral">
+                    <div style="font-size:1.1rem;font-weight:700">🚫 FILTERED OUT</div>
+                    <div style="color:#8b949e;font-size:0.85rem;margin-top:8px">
+                        Signal: {s} &nbsp;·&nbsp; Strength: {strength}/100 &nbsp;·&nbsp; Risk: {rl}
+                    </div>
+                    <div style="color:#8b949e;font-size:0.8rem;margin-top:4px">
+                        Does not match your current filter settings
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
             else:
-                box_class  = "signal-neutral"
-                sig_emoji  = "⚪"
+                if s == "LONG":
+                    box_class = "signal-long"
+                    sig_emoji = "🟢"
+                elif s == "SHORT":
+                    box_class = "signal-short"
+                    sig_emoji = "🔴"
+                else:
+                    box_class = "signal-neutral"
+                    sig_emoji = "⚪"
 
-            entry_fmt = f"{curr_sym}{sig['entry']:,.2f}"
-            sl_fmt    = f"{curr_sym}{sig['stop_loss']:,.2f}"
-            tp_fmt    = f"{curr_sym}{sig['take_profit']:,.2f}"
-            rl        = sig["risk_level"]
-            rl_class  = f"risk-{rl.lower()}"
+                entry_fmt = f"{curr_sym}{sig['entry']:,.2f}"
+                sl_fmt    = f"{curr_sym}{sig['stop_loss']:,.2f}"
+                tp_fmt    = f"{curr_sym}{sig['take_profit']:,.2f}"
+                rl_class  = f"risk-{rl.lower()}"
 
-            st.markdown(f"""
-            <div class="signal-box {box_class}">
-                <div class="signal-title">{sig_emoji} {s}</div>
-                <div class="signal-meta">Signal Strength: {strength}/100</div>
-                <div class="signal-row">
-                    <span class="key">📍 Entry</span>
-                    <span class="val">{entry_fmt}</span>
+                st.markdown(f"""
+                <div class="signal-box {box_class}">
+                    <div class="signal-title">{sig_emoji} {s}</div>
+                    <div class="signal-meta">Signal Strength: {strength}/100</div>
+                    <div class="signal-row">
+                        <span class="key">📍 Entry</span>
+                        <span class="val">{entry_fmt}</span>
+                    </div>
+                    <div class="signal-row">
+                        <span class="key">🛑 Stop</span>
+                        <span class="val">{sl_fmt}</span>
+                    </div>
+                    <div class="signal-row">
+                        <span class="key">🎯 Target</span>
+                        <span class="val">{tp_fmt}</span>
+                    </div>
+                    <div class="signal-row" style="margin-top:6px;">
+                        <span class="key">Risk</span>
+                        <span class="val {rl_class}">{rl}</span>
+                    </div>
                 </div>
-                <div class="signal-row">
-                    <span class="key">🛑 Stop</span>
-                    <span class="val">{sl_fmt}</span>
-                </div>
-                <div class="signal-row">
-                    <span class="key">🎯 Target</span>
-                    <span class="val">{tp_fmt}</span>
-                </div>
-                <div class="signal-row" style="margin-top:6px;">
-                    <span class="key">Risk</span>
-                    <span class="val {rl_class}">{rl}</span>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
 
-            # Long conditions
+            # ── Conditions (always shown, read-only reference) ───────────────
             long_rows_html = ""
             for name, val in sig["conditions_long"].items():
                 short_name = name.split("(")[0].strip()
@@ -1157,7 +1228,6 @@ with tab1:
             </div>
             """, unsafe_allow_html=True)
 
-            # Short conditions
             short_rows_html = ""
             for name, val in sig["conditions_short"].items():
                 short_name = name.split("(")[0].strip()
@@ -1452,3 +1522,130 @@ with tab3:
                 margin=dict(l=10, r=10, t=10, b=10),
             )
             st.plotly_chart(fig_pie, use_container_width=True)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Signal Scanner
+# ═════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.markdown("### 📋 Signal Scanner")
+    st.caption("Scan all watchlist tickers and filter by your signal + risk settings")
+
+    if st.button("🔍 Run Scanner", type="primary"):
+        with st.spinner("Scanning all tickers..."):
+            results      = []
+            all_tickers  = THAI_POPULAR + US_POPULAR
+            progress_bar = st.progress(0)
+
+            for i, t in enumerate(all_tickers):
+                progress_bar.progress((i + 1) / len(all_tickers))
+
+                df_t = fetch_data(t, "3mo", "1d")
+                if df_t is None or len(df_t) < 10:
+                    continue
+
+                df_t = compute_indicators(df_t)
+                if len(df_t) < 2:
+                    continue
+
+                s = compute_signal(df_t, min_conditions)
+                if s is None:
+                    continue
+
+                last_t = df_t.iloc[-1]
+                prev_t = df_t.iloc[-2]
+
+                try:
+                    price_t = float(last_t["Close"])
+                    prev_p  = float(prev_t["Close"])
+                    chg_t   = (price_t - prev_p) / prev_p * 100 if prev_p != 0 else 0.0
+                except Exception:
+                    price_t = 0.0
+                    chg_t   = 0.0
+
+                currency_t = "THB" if t.endswith(".BK") else "USD"
+
+                # Apply filters
+                if s["signal"]     not in signal_filter:  continue
+                if s["risk_level"] not in risk_filter:     continue
+                if s["strength"]   <  min_strength:        continue
+
+                rsi_display = "-"
+                if pd.notna(last_t["RSI"]):
+                    try:
+                        rsi_display = f"{float(last_t['RSI']):.1f}"
+                    except Exception:
+                        pass
+
+                results.append({
+                    "Ticker":   t,
+                    "Market":   "🇹🇭 Thai" if t.endswith(".BK") else "🇺🇸 US",
+                    "Price":    f"{price_t:,.2f} {currency_t}",
+                    "Change %": f"{chg_t:+.2f}%",
+                    "Signal":   s["signal"],
+                    "Strength": s["strength"],
+                    "Risk":     s["risk_level"],
+                    "Entry":    f"{s['entry']:,.2f}",
+                    "Stop":     f"{s['stop_loss']:,.2f}",
+                    "Target":   f"{s['take_profit']:,.2f}",
+                    "RSI":      rsi_display,
+                })
+
+            progress_bar.empty()
+
+        if not results:
+            st.warning(
+                "ไม่มี ticker ที่ผ่าน filter ที่ตั้งไว้ — ลองปรับ filter ใน sidebar"
+            )
+        else:
+            st.success(f"พบ {len(results)} ticker ที่ผ่าน filter")
+
+            df_scan = pd.DataFrame(results)
+
+            def style_signal(val):
+                if val == "LONG":   return "color: #2ea043; font-weight: bold"
+                if val == "SHORT":  return "color: #f85149; font-weight: bold"
+                return "color: #8b949e"
+
+            def style_risk(val):
+                if val == "HIGH":   return "color: #f85149"
+                if val == "MEDIUM": return "color: #f0a500"
+                return "color: #2ea043"
+
+            def style_change(val):
+                return "color: #2ea043" if "+" in str(val) else "color: #f85149"
+
+            styled = (
+                df_scan.style
+                .map(style_signal, subset=["Signal"])
+                .map(style_risk,   subset=["Risk"])
+                .map(style_change, subset=["Change %"])
+            )
+
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            # Summary counts
+            long_count    = sum(1 for r in results if r["Signal"] == "LONG")
+            short_count   = sum(1 for r in results if r["Signal"] == "SHORT")
+            neutral_count = sum(1 for r in results if r["Signal"] == "NEUTRAL")
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="value" style="color:#2ea043;">{long_count}</div>
+                    <div class="label">LONG signals</div>
+                </div>""", unsafe_allow_html=True)
+            with c2:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="value" style="color:#8b949e;">{neutral_count}</div>
+                    <div class="label">NEUTRAL signals</div>
+                </div>""", unsafe_allow_html=True)
+            with c3:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="value" style="color:#f85149;">{short_count}</div>
+                    <div class="label">SHORT signals</div>
+                </div>""", unsafe_allow_html=True)
+    else:
+        st.info("👆 Click **Run Scanner** to scan all 20 watchlist tickers against your current filter settings.")
