@@ -396,6 +396,189 @@ def detect_patterns(df):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PIVOT POINT HELPER
+# ─────────────────────────────────────────────────────────────────────────────
+def find_pivots(series, window=5):
+    """Find local highs and lows using rolling window."""
+    pivots_high = []
+    pivots_low  = []
+    for i in range(window, len(series) - window):
+        window_vals = series.iloc[i - window : i + window + 1]
+        if series.iloc[i] == window_vals.max():
+            pivots_high.append((i, series.index[i], float(series.iloc[i])))
+        if series.iloc[i] == window_vals.min():
+            pivots_low.append((i, series.index[i], float(series.iloc[i])))
+    return pivots_high, pivots_low
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIVERGENCE DETECTION ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
+def detect_divergences(df, lookback_bars=10, pivot_window=5):
+    """
+    Detect all 4 divergence types using pivot-based RSI vs price comparison.
+    Returns list of dicts with type, subtype, div_class, date, pivots,
+    bars_ago, confidence, description.
+    """
+    results = []
+    if len(df) < 20 or df["RSI"].isna().all():
+        return results
+
+    price = df["Close"]
+    rsi   = df["RSI"].ffill()
+
+    price_highs, price_lows = find_pivots(price, pivot_window)
+    rsi_highs,   rsi_lows   = find_pivots(rsi,   pivot_window)
+
+    def nearest_rsi_pivot(rsi_pivots, target_idx, tolerance=3):
+        candidates = [
+            (abs(r[0] - target_idx), r)
+            for r in rsi_pivots
+            if abs(r[0] - target_idx) <= tolerance
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda x: x[0])[1]
+
+    # ── REGULAR BULLISH: price Lower Low + RSI Higher Low ─────────────────
+    for j in range(1, len(price_lows)):
+        p2 = price_lows[j]        # more recent low
+        p1 = price_lows[j - 1]    # earlier low
+        if p2[0] - p1[0] < 5:
+            continue
+        r1 = nearest_rsi_pivot(rsi_lows, p1[0])
+        r2 = nearest_rsi_pivot(rsi_lows, p2[0])
+        if not r1 or not r2:
+            continue
+        if p2[2] < p1[2] and r2[2] > r1[2]:
+            bars_ago = len(df) - 1 - p2[0]
+            conf = 80
+            if r2[2] < 40:          conf += 10
+            if r2[2] - r1[2] > 5:  conf += 5
+            conf = min(95, conf)
+            results.append({
+                "type": "Regular Bullish Divergence",
+                "subtype": "bullish",
+                "div_class": "regular",
+                "date": p2[1],
+                "price_pivot1": p1[2], "price_pivot2": p2[2],
+                "rsi_pivot1": r1[2],   "rsi_pivot2": r2[2],
+                "bars_ago": bars_ago,
+                "confidence": conf,
+                "description": (
+                    f"Price made Lower Low ({p2[2]:.2f} < {p1[2]:.2f}) "
+                    f"but RSI made Higher Low ({r2[2]:.1f} > {r1[2]:.1f})"
+                ),
+            })
+
+    # ── HIDDEN BULLISH: price Higher Low + RSI Lower Low ──────────────────
+    for j in range(1, len(price_lows)):
+        p2 = price_lows[j]
+        p1 = price_lows[j - 1]
+        if p2[0] - p1[0] < 5:
+            continue
+        r1 = nearest_rsi_pivot(rsi_lows, p1[0])
+        r2 = nearest_rsi_pivot(rsi_lows, p2[0])
+        if not r1 or not r2:
+            continue
+        if p2[2] > p1[2] and r2[2] < r1[2]:
+            bars_ago = len(df) - 1 - p2[0]
+            conf = 72
+            if r2[2] < 50: conf += 8
+            conf = min(90, conf)
+            results.append({
+                "type": "Hidden Bullish Divergence",
+                "subtype": "bullish",
+                "div_class": "hidden",
+                "date": p2[1],
+                "price_pivot1": p1[2], "price_pivot2": p2[2],
+                "rsi_pivot1": r1[2],   "rsi_pivot2": r2[2],
+                "bars_ago": bars_ago,
+                "confidence": conf,
+                "description": (
+                    f"Price made Higher Low ({p2[2]:.2f} > {p1[2]:.2f}) "
+                    f"but RSI made Lower Low ({r2[2]:.1f} < {r1[2]:.1f})"
+                ),
+            })
+
+    # ── REGULAR BEARISH: price Higher High + RSI Lower High ───────────────
+    for j in range(1, len(price_highs)):
+        p2 = price_highs[j]
+        p1 = price_highs[j - 1]
+        if p2[0] - p1[0] < 5:
+            continue
+        r1 = nearest_rsi_pivot(rsi_highs, p1[0])
+        r2 = nearest_rsi_pivot(rsi_highs, p2[0])
+        if not r1 or not r2:
+            continue
+        if p2[2] > p1[2] and r2[2] < r1[2]:
+            bars_ago = len(df) - 1 - p2[0]
+            conf = 80
+            if r2[2] > 60:          conf += 10
+            if r1[2] - r2[2] > 5:  conf += 5
+            conf = min(95, conf)
+            results.append({
+                "type": "Regular Bearish Divergence",
+                "subtype": "bearish",
+                "div_class": "regular",
+                "date": p2[1],
+                "price_pivot1": p1[2], "price_pivot2": p2[2],
+                "rsi_pivot1": r1[2],   "rsi_pivot2": r2[2],
+                "bars_ago": bars_ago,
+                "confidence": conf,
+                "description": (
+                    f"Price made Higher High ({p2[2]:.2f} > {p1[2]:.2f}) "
+                    f"but RSI made Lower High ({r2[2]:.1f} < {r1[2]:.1f})"
+                ),
+            })
+
+    # ── HIDDEN BEARISH: price Lower High + RSI Higher High ────────────────
+    for j in range(1, len(price_highs)):
+        p2 = price_highs[j]
+        p1 = price_highs[j - 1]
+        if p2[0] - p1[0] < 5:
+            continue
+        r1 = nearest_rsi_pivot(rsi_highs, p1[0])
+        r2 = nearest_rsi_pivot(rsi_highs, p2[0])
+        if not r1 or not r2:
+            continue
+        if p2[2] < p1[2] and r2[2] > r1[2]:
+            bars_ago = len(df) - 1 - p2[0]
+            conf = 72
+            if r2[2] > 50: conf += 8
+            conf = min(90, conf)
+            results.append({
+                "type": "Hidden Bearish Divergence",
+                "subtype": "bearish",
+                "div_class": "hidden",
+                "date": p2[1],
+                "price_pivot1": p1[2], "price_pivot2": p2[2],
+                "rsi_pivot1": r1[2],   "rsi_pivot2": r2[2],
+                "bars_ago": bars_ago,
+                "confidence": conf,
+                "description": (
+                    f"Price made Lower High ({p2[2]:.2f} < {p1[2]:.2f}) "
+                    f"but RSI made Higher High ({r2[2]:.1f} > {r1[2]:.1f})"
+                ),
+            })
+
+    # Sort by date descending, then deduplicate signals within 3 calendar days
+    results.sort(key=lambda x: x["date"], reverse=True)
+    deduped    = []
+    seen_dates = []
+    for r in results:
+        too_close = any(
+            abs((r["date"] - d).days) <= 3
+            for d in seen_dates
+        )
+        if not too_close:
+            deduped.append(r)
+            seen_dates.append(r["date"])
+
+    return deduped
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SIGNAL ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 def compute_signal(df, min_conditions=3):
@@ -708,7 +891,7 @@ def run_backtest(df, initial_capital=100000):
 # CHART: MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 def make_main_chart(df, patterns, show_sma20, show_sma50, show_sma200,
-                    show_ema, show_bb):
+                    show_ema, show_bb, div_signals=None):
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
@@ -884,6 +1067,43 @@ def make_main_chart(df, patterns, show_sma20, show_sma50, show_sma200,
     # Secondary y (volume) — hide labels
     fig.update_yaxes(showticklabels=False, row=1, col=1, secondary_y=True)
 
+    # Divergence annotations on RSI panel (row 2)
+    if div_signals:
+        for dv in div_signals:
+            dv_color = "#2ea043" if dv["subtype"] == "bullish" else "#f85149"
+            try:
+                dv_date = dv["date"]
+                fig.add_vline(
+                    x=dv_date,
+                    line=dict(color=dv_color, width=1, dash="dot"),
+                    row=2, col=1,
+                )
+                # Add a small marker on the RSI line at signal date
+                rsi_at_date = None
+                try:
+                    idx = df.index.get_indexer([dv_date], method="nearest")[0]
+                    rsi_at_date = float(df["RSI"].iloc[idx])
+                except Exception:
+                    pass
+                if rsi_at_date is not None:
+                    marker_sym = "triangle-up" if dv["subtype"] == "bullish" else "triangle-down"
+                    fig.add_trace(go.Scatter(
+                        x=[dv_date],
+                        y=[rsi_at_date],
+                        mode="markers",
+                        marker=dict(symbol=marker_sym, color=dv_color,
+                                    size=9, line=dict(width=1, color="#0d1117")),
+                        name=dv["type"],
+                        showlegend=False,
+                        hovertemplate=(
+                            f"<b>{dv['type']}</b><br>"
+                            f"Conf: {dv['confidence']}%<br>"
+                            f"RSI: {rsi_at_date:.1f}<extra></extra>"
+                        ),
+                    ), row=2, col=1)
+            except Exception:
+                pass
+
     return fig
 
 
@@ -1050,6 +1270,45 @@ with st.sidebar:
         help="How many conditions must be met to trigger LONG or SHORT",
     )
 
+    st.markdown("---")
+    st.markdown("**🔀 Divergence Scanner**")
+
+    div_types = st.multiselect(
+        "Divergence types",
+        options=[
+            "Regular Bullish Divergence",
+            "Hidden Bullish Divergence",
+            "Regular Bearish Divergence",
+            "Hidden Bearish Divergence",
+        ],
+        default=["Regular Bullish Divergence", "Hidden Bullish Divergence"],
+        help="Regular = reversal signal | Hidden = continuation signal",
+    )
+
+    max_bars_ago = st.slider(
+        "Signal occurred within last N bars",
+        min_value=1, max_value=60, value=10, step=1,
+        help="Only show divergences detected within this many bars from today",
+    )
+
+    min_div_confidence = st.slider(
+        "Min divergence confidence",
+        min_value=50, max_value=95, value=70, step=5,
+    )
+
+    pivot_window = st.slider(
+        "Pivot sensitivity (bars)",
+        min_value=3, max_value=10, value=5, step=1,
+        help="Smaller = more sensitive (more signals), Larger = fewer but stronger signals",
+    )
+
+    div_scan_period = st.selectbox(
+        "Scan period",
+        ["3mo", "6mo", "1y"],
+        index=1,
+        key="div_scan_period",
+    )
+
     st.caption("Data: Yahoo Finance · Cached 5 min")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1087,7 +1346,10 @@ if "portfolio" not in st.session_state:
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Chart & Signal", "⏱ Backtesting", "💼 Portfolio Tracker", "📋 Scanner"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Chart & Signal", "⏱ Backtesting",
+    "💼 Portfolio Tracker", "📋 Scanner", "🔀 Divergence",
+])
 
 # ═════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Chart & Signal
@@ -1113,10 +1375,21 @@ with tab1:
         </div>
         """, unsafe_allow_html=True)
 
-        # Main chart
+        # Divergence detection for current ticker
+        divs = detect_divergences(df, lookback_bars=max_bars_ago,
+                                   pivot_window=pivot_window)
+        recent_divs = [
+            d for d in divs
+            if d["bars_ago"] <= max_bars_ago
+            and d["type"] in div_types
+            and d["confidence"] >= min_div_confidence
+        ]
+
+        # Main chart (with divergence annotations on RSI panel)
         fig_main = make_main_chart(
             df, patterns,
             show_sma20, show_sma50, show_sma200, show_ema, show_bb,
+            div_signals=recent_divs,
         )
         st.plotly_chart(fig_main, use_container_width=True)
 
@@ -1145,6 +1418,39 @@ with tab1:
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+
+        # Divergence signals panel
+        if recent_divs:
+            st.markdown("---")
+            st.markdown("**🔀 Divergence Signals**")
+            for d in recent_divs[:5]:
+                color     = "#2ea043" if d["subtype"] == "bullish" else "#f85149"
+                cls_badge = "🔄 Regular" if d["div_class"] == "regular" else "↗️ Hidden"
+                try:
+                    sig_date = d["date"].strftime("%Y-%m-%d")
+                except Exception:
+                    sig_date = str(d["date"])[:10]
+                st.markdown(f"""
+                <div style='background:#161b22;border:1px solid {color}33;
+                            border-left:3px solid {color};border-radius:8px;
+                            padding:12px 16px;margin-bottom:8px'>
+                    <div style='display:flex;justify-content:space-between;align-items:center'>
+                        <span style='color:{color};font-weight:700;font-size:0.9rem'>
+                            {d["type"]}
+                        </span>
+                        <span style='color:#8b949e;font-size:0.78rem'>
+                            {cls_badge} &nbsp;·&nbsp; {d["confidence"]}% conf
+                            &nbsp;·&nbsp; {d["bars_ago"]} bars ago
+                        </span>
+                    </div>
+                    <div style='color:#8b949e;font-size:0.8rem;margin-top:6px'>
+                        {d["description"]}
+                    </div>
+                    <div style='color:#8b949e;font-size:0.75rem;margin-top:4px'>
+                        📅 {sig_date}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
     with col_right:
         if sig is None:
@@ -1649,3 +1955,224 @@ with tab4:
                 </div>""", unsafe_allow_html=True)
     else:
         st.info("👆 Click **Run Scanner** to scan all 20 watchlist tickers against your current filter settings.")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Divergence Scanner
+# ═════════════════════════════════════════════════════════════════════════════
+with tab5:
+    st.markdown("### 🔀 Divergence Scanner")
+
+    # Settings summary row
+    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+    with col_s1: st.metric("Divergence Types",  len(div_types))
+    with col_s2: st.metric("Max Bars Ago",       max_bars_ago)
+    with col_s3: st.metric("Min Confidence",     f"{min_div_confidence}%")
+    with col_s4: st.metric("Pivot Window",        pivot_window)
+
+    # Explainer cards
+    st.markdown("""
+    <div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin:16px 0'>
+      <div style='background:#0d2818;border:1px solid #2ea04366;border-radius:8px;padding:12px'>
+        <div style='color:#2ea043;font-weight:700;font-size:0.85rem'>🔄 Regular Bullish</div>
+        <div style='color:#8b949e;font-size:0.78rem;margin-top:4px'>
+          Price Lower Low + RSI Higher Low &rarr; Reversal up signal
+        </div>
+      </div>
+      <div style='background:#0d2818;border:1px solid #2ea04333;border-radius:8px;padding:12px'>
+        <div style='color:#98fb98;font-weight:700;font-size:0.85rem'>↗️ Hidden Bullish</div>
+        <div style='color:#8b949e;font-size:0.78rem;margin-top:4px'>
+          Price Higher Low + RSI Lower Low &rarr; Uptrend continuation
+        </div>
+      </div>
+      <div style='background:#2d0f0f;border:1px solid #f8514966;border-radius:8px;padding:12px'>
+        <div style='color:#f85149;font-weight:700;font-size:0.85rem'>🔄 Regular Bearish</div>
+        <div style='color:#8b949e;font-size:0.78rem;margin-top:4px'>
+          Price Higher High + RSI Lower High &rarr; Reversal down signal
+        </div>
+      </div>
+      <div style='background:#2d0f0f;border:1px solid #f8514933;border-radius:8px;padding:12px'>
+        <div style='color:#ff8c69;font-weight:700;font-size:0.85rem'>↘️ Hidden Bearish</div>
+        <div style='color:#8b949e;font-size:0.78rem;margin-top:4px'>
+          Price Lower High + RSI Higher High &rarr; Downtrend continuation
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("🔍 Scan for Divergences", type="primary", key="div_scan_btn"):
+        with st.spinner("Detecting divergence patterns across all tickers..."):
+            all_tickers_div = THAI_POPULAR + US_POPULAR
+            div_results     = []
+            prog_div        = st.progress(0)
+
+            for i, t in enumerate(all_tickers_div):
+                prog_div.progress((i + 1) / len(all_tickers_div))
+
+                df_t = fetch_data(t, div_scan_period, "1d")
+                if df_t is None or len(df_t) < 30:
+                    continue
+                df_t = compute_indicators(df_t)
+                divs_t = detect_divergences(
+                    df_t,
+                    lookback_bars=max_bars_ago,
+                    pivot_window=pivot_window,
+                )
+
+                # Apply filters
+                filtered = [
+                    d for d in divs_t
+                    if d["bars_ago"]   <= max_bars_ago
+                    and d["type"]      in div_types
+                    and d["confidence"] >= min_div_confidence
+                ]
+                if not filtered:
+                    continue
+
+                # Take the strongest (highest conf, then most recent) per ticker
+                best = sorted(filtered,
+                              key=lambda x: (-x["confidence"], x["bars_ago"]))[0]
+
+                last_t = df_t.iloc[-1]
+                prev_t = df_t.iloc[-2]
+                try:
+                    price_t = float(last_t["Close"])
+                    chg_t   = (price_t - float(prev_t["Close"])) / float(prev_t["Close"]) * 100
+                except Exception:
+                    price_t, chg_t = 0.0, 0.0
+
+                rsi_t      = float(last_t["RSI"]) if pd.notna(last_t["RSI"]) else 0.0
+                currency_t = "THB" if t.endswith(".BK") else "USD"
+
+                try:
+                    sig_date_str = best["date"].strftime("%Y-%m-%d")
+                except Exception:
+                    sig_date_str = str(best["date"])[:10]
+
+                div_results.append({
+                    "Ticker":      t,
+                    "Market":      "🇹🇭" if t.endswith(".BK") else "🇺🇸",
+                    "Price":       f"{price_t:,.2f} {currency_t}",
+                    "Chg %":       f"{chg_t:+.2f}%",
+                    "Signal Type": best["type"],
+                    "Class":       "🔄 Regular" if best["div_class"] == "regular" else "↗️ Hidden",
+                    "Direction":   "🟢 Bullish" if best["subtype"] == "bullish" else "🔴 Bearish",
+                    "Confidence":  best["confidence"],
+                    "Bars Ago":    best["bars_ago"],
+                    "Signal Date": sig_date_str,
+                    "RSI Now":     f"{rsi_t:.1f}",
+                    "Description": best["description"],
+                    "_subtype":    best["subtype"],
+                })
+
+            prog_div.empty()
+
+        if not div_results:
+            st.warning(
+                "ไม่พบ divergence ที่ผ่าน filter — "
+                "ลองเพิ่ม 'Max Bars Ago' หรือลด 'Min Confidence'"
+            )
+        else:
+            # Sort: bullish first, then by confidence descending
+            div_results.sort(key=lambda x: (x["_subtype"] != "bullish", -x["Confidence"]))
+
+            bull_res = [r for r in div_results if r["_subtype"] == "bullish"]
+            bear_res = [r for r in div_results if r["_subtype"] == "bearish"]
+
+            st.success(
+                f"พบ {len(div_results)} ticker &nbsp;·&nbsp; "
+                f"🟢 Bullish: {len(bull_res)} &nbsp;·&nbsp; "
+                f"🔴 Bearish: {len(bear_res)}"
+            )
+
+            # Summary metric cards
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            reg_bull = sum(1 for r in div_results if "Regular Bullish" in r["Signal Type"])
+            hid_bull = sum(1 for r in div_results if "Hidden Bullish"  in r["Signal Type"])
+            reg_bear = sum(1 for r in div_results if "Regular Bearish" in r["Signal Type"])
+            avg_conf = sum(r["Confidence"] for r in div_results) / len(div_results)
+
+            with mc1:
+                st.markdown(f"""
+                <div class='metric-card'>
+                    <div class='value' style='color:#2ea043'>{reg_bull}</div>
+                    <div class='label'>Regular Bullish</div>
+                </div>""", unsafe_allow_html=True)
+            with mc2:
+                st.markdown(f"""
+                <div class='metric-card'>
+                    <div class='value' style='color:#98fb98'>{hid_bull}</div>
+                    <div class='label'>Hidden Bullish</div>
+                </div>""", unsafe_allow_html=True)
+            with mc3:
+                st.markdown(f"""
+                <div class='metric-card'>
+                    <div class='value' style='color:#f85149'>{reg_bear}</div>
+                    <div class='label'>Regular Bearish</div>
+                </div>""", unsafe_allow_html=True)
+            with mc4:
+                st.markdown(f"""
+                <div class='metric-card'>
+                    <div class='value' style='color:#f0a500'>{avg_conf:.0f}%</div>
+                    <div class='label'>Avg Confidence</div>
+                </div>""", unsafe_allow_html=True)
+
+            # Results table
+            display_cols = [c for c in div_results[0].keys() if not c.startswith("_")]
+            df_div = pd.DataFrame(div_results)[display_cols]
+
+            def style_direction(val):
+                if "Bullish" in str(val): return "color:#2ea043;font-weight:bold"
+                if "Bearish" in str(val): return "color:#f85149;font-weight:bold"
+                return ""
+
+            def style_conf(val):
+                if val >= 85: return "color:#2ea043;font-weight:bold"
+                if val >= 75: return "color:#f0a500"
+                return "color:#8b949e"
+
+            def style_bars(val):
+                if val <= 3:  return "color:#2ea043;font-weight:bold"
+                if val <= 7:  return "color:#f0a500"
+                return "color:#8b949e"
+
+            styled_div = (
+                df_div.style
+                .map(style_direction, subset=["Direction"])
+                .map(style_conf,      subset=["Confidence"])
+                .map(style_bars,      subset=["Bars Ago"])
+            )
+            st.dataframe(styled_div, use_container_width=True, hide_index=True)
+
+            # Detail expanders
+            st.markdown("**📋 Divergence Details**")
+            for r in div_results[:10]:
+                color = "#2ea043" if r["_subtype"] == "bullish" else "#f85149"
+                with st.expander(
+                    f"{r['Ticker']} — {r['Signal Type']} · "
+                    f"{r['Bars Ago']} bars ago · {r['Confidence']}% conf"
+                ):
+                    ec1, ec2, ec3 = st.columns(3)
+                    with ec1:
+                        st.markdown(f"**Ticker:** {r['Ticker']}")
+                        st.markdown(f"**Price:** {r['Price']} ({r['Chg %']})")
+                        st.markdown(f"**RSI now:** {r['RSI Now']}")
+                    with ec2:
+                        st.markdown(f"**Signal date:** {r['Signal Date']}")
+                        st.markdown(f"**Bars ago:** {r['Bars Ago']}")
+                        st.markdown(f"**Confidence:** {r['Confidence']}%")
+                    with ec3:
+                        st.markdown(f"**Type:** {r['Signal Type']}")
+                        st.markdown(f"**Class:** {r['Class']}")
+                    st.markdown(f"**📖 Explanation:** {r['Description']}")
+                    if st.button(
+                        f"📊 View chart for {r['Ticker']}",
+                        key=f"view_div_{r['Ticker']}",
+                    ):
+                        st.info(
+                            f"ไปที่ Sidebar → เลือก Market: Manual → พิมพ์ {r['Ticker']}"
+                        )
+    else:
+        st.info(
+            "👆 Click **Scan for Divergences** to search all 20 watchlist tickers "
+            "for RSI divergence patterns based on your sidebar settings."
+        )
